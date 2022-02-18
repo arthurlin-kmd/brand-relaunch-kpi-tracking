@@ -42,88 +42,100 @@ con <- DBI::dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "BIDW",
                       PWD = keyring::key_get("kmd_password"), Trusted_Connection = "TRUE", 
                       Port = 1433)
 
-# Collect Revenue Data ----------------------------------------------------
-
-collect_sales_metrics <- function(){
-  
-  sales_bq <- kmdr::base_txn_query(connection = .connection, 
-                                   period_start = .period_start, 
-                                   period_end = .period_end)
-  
-  aggregated_sales <- sales_bq %>% 
-    dplyr::mutate(customer_type = dplyr::case_when(customer_type == "Summit Club" ~ "Summit Club", 
-                                                   TRUE ~ "Non Member")) %>% 
-    dplyr::filter(customer_type %in% c("Summit Club", "Non Member"))
-  
-  set_source_tables(connection = connection)
-  total_kmd_sales_tbl <- tbls$fact_sales_trans %>% dplyr::select(dim_date_key, 
-                                                                 dim_customer_key, dim_country_key, dim_location_key, 
-                                                                 dim_gift_voucher_key, sale_transaction, sale_amount_incl_gst, 
-                                                                 sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key) %>% 
-    dplyr::filter(dim_gift_voucher_key == -1) %>% dplyr::left_join(dplyr::select(tbls$dim_customer, 
-                                                                                 dim_customer_key, customer_number, customer_type, contact_by_email), 
-                                                                   by = c("dim_customer_key")) %>% dplyr::left_join(dplyr::select(tbls$dim_date, 
-                                                                                                                                  dim_date_key, full_date, cal_month_start, fin_year, 
-                                                                                                                                  acc_week_of_year, week_start), by = c("dim_date_key")) %>% 
-    dplyr::filter(dplyr::between(full_date, period_start, 
-                                 period_end)) %>% dplyr::left_join(dplyr::select(tbls$dim_location, 
-                                                                                 dim_location_key, location_code), by = c("dim_location_key")) %>% 
-    encode_sales_country() %>% encode_sales_channel() %>% 
-    encode_sales_location() %>% dplyr::select(full_date, 
-                                              cal_month_start, fin_year, acc_week_of_year, week_start, 
-                                              sales_country, sales_channel, sales_location, dim_customer_key, 
-                                              customer_number, customer_type, sale_transaction, sale_amount_incl_gst, 
-                                              sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key)
-}
-
-
-sales_metrics_monthly_tbl <- collect_sales_metrics(cal_month_start, fin_year, sales_country, customer_type, sales_channel,
-                                           .connection = con, 
-                                           .period_start = reporting_period_start, 
-                                           .period_end = reporting_period_end) %>% 
-  recode_dates() %>% 
-  standardise_currency(country_var = sales_country, 
-                       cols = c(sum_sales_incl_gst, 
-                                mean_txn_sale_amount, 
-                                mean_member_rev)) %>% 
-  recode_channel_vals() %>% 
-  rename(period_start = cal_month_start) %>% 
-  arrange(period_start, fin_year, sales_country, customer_type, sales_channel)
-
 
 # Collect New Members -----------------------------------------------------
 collect_new_members_age <- function(.connection, 
                                     .period_start, 
                                     .period_end) {
   bq <- base_member_query(connection = .connection) %>% 
-        dplyr::filter(country %in% c("Australia", "New Zealand", "United Kingdom", "United States")) %>% 
-        dplyr::filter(dplyr::between(date_joined, .period_start, .period_end)) %>% 
-        select(customer_number, customer_type, contact_by_email, join_cal_month_start, join_fin_year,
-               country, state_province, city_town, date_of_birth, date_joined) %>% 
-        dplyr::collect() %>% 
-        dplyr::mutate(member_age = lubridate::as.period(lubridate::interval(start = date_of_birth, 
-                                                                            end = date_joined))$year) %>% 
-        dplyr::mutate(age_bracket = dplyr::case_when(
-          member_age < 17 ~ "0-17",
-          member_age < 25 ~ "18-24",
-          member_age < 35 ~ "25-34", 
-          member_age < 40 ~ "35-39", 
-          member_age < 55 ~ "40-54", 
-          member_age < 65 ~ "55-64", 
-          TRUE ~ "65+" 
-        ))
+    dplyr::filter(country %in% c("Australia", "New Zealand", "United Kingdom", "United States")) %>% 
+    dplyr::filter(dplyr::between(date_joined, .period_start, .period_end)) %>% 
+    select(customer_number, customer_type, contact_by_email, join_cal_month_start, join_fin_year,
+           country, state_province, city_town, date_of_birth, date_joined) %>% 
+    dplyr::collect() %>% 
+    dplyr::mutate(member_age = lubridate::as.period(lubridate::interval(start = date_of_birth, 
+                                                                        end = date_joined))$year) %>% 
+    dplyr::mutate(age_bracket = dplyr::case_when(
+      member_age < 17 ~ "0-17",
+      member_age < 25 ~ "18-24",
+      member_age < 35 ~ "25-34", 
+      member_age < 40 ~ "35-39", 
+      member_age < 55 ~ "40-54", 
+      member_age < 65 ~ "55-64", 
+      TRUE ~ "65+" 
+    ))
   
   return(bq)
 }
 
 acquisition_monthly_tbl <- collect_new_members_age(.connection   = con, 
-                                                 .period_start = reporting_period_start,
-                                                 .period_end   = reporting_period_end) %>% 
+                                                   .period_start = reporting_period_start,
+                                                   .period_end   = reporting_period_end) %>% 
   recode_dates() %>% 
   rename(period_start = join_cal_month_start) %>% 
   group_by(period_start, join_fin_year, country, age_bracket) %>% 
   summarise(n = n()) %>% 
   ungroup()
+
+
+
+# Collect Master Data for calculating KPI ----------------------------------------------------
+
+collect_sales_metrics_modified <- function(.connection, .period_start, .period_end){
+  
+  # this is a copy of base_txn_query with DOB and date_joined added
+  tbls <- set_source_tables(connection = con)
+  total_kmd_sales_tbl <- tbls$fact_sales_trans %>% 
+    dplyr::select(dim_date_key,dim_customer_key, dim_country_key, dim_location_key, dim_gift_voucher_key, sale_transaction, sale_amount_incl_gst, 
+                  sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key) %>% 
+    dplyr::filter(dim_gift_voucher_key == -1) %>% 
+    dplyr::left_join(dplyr::select(tbls$dim_customer, dim_customer_key, customer_number, customer_type, contact_by_email, date_of_birth, date_joined), by = c("dim_customer_key")) %>% 
+    dplyr::left_join(dplyr::select(tbls$dim_date, dim_date_key, full_date, cal_month_start, fin_year, acc_week_of_year, week_start), by = c("dim_date_key")) %>% 
+    dplyr::filter(dplyr::between(full_date, period_start, period_end)) %>% 
+    dplyr::left_join(dplyr::select(tbls$dim_location, dim_location_key, location_code), by = c("dim_location_key")) %>% 
+    dplyr::left_join(dplyr::select(tbls$dim_product, dim_product_key, product_group, item_group), by = c("dim_product_key")) %>% 
+    encode_sales_country() %>% 
+    encode_sales_channel() %>% 
+    encode_sales_location() %>% 
+    dplyr::select(full_date, cal_month_start, fin_year, acc_week_of_year, week_start, 
+                  sales_country, sales_channel, sales_location, dim_customer_key, 
+                  customer_number, customer_type, sale_transaction, sale_amount_incl_gst, 
+                  sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key, 
+                  date_of_birth, date_joined, product_group, item_group)
+    return(total_kmd_sales_tbl)
+}
+
+# Collect spend trend segmented by New and Existing Members----
+customer_age_bracket_metrics_tbl <- collect_sales_metrics_modified(.connection   = con, 
+                                                                   .period_start = reporting_period_start,
+                                                                   .period_end   = reporting_period_end) %>%
+  dplyr::mutate(customer_type = dplyr::case_when(customer_type == "Summit Club" ~ "Summit Club", 
+                                                           TRUE ~ "Non Member"),
+                member_status = dplyr::case_when(date_joined < period_start ~ "Existing Members",
+                                                 TRUE ~ "New Members")) %>% 
+  dplyr::filter(customer_type %in% c("Summit Club") & 
+                  member_status %in% c("New Members") &
+                  !is.na(date_of_birth)) %>%
+  dplyr::collect() %>% 
+  # member age is set to when they sign up to the program
+  dplyr::mutate(member_age = lubridate::as.period(lubridate::interval(start = date_of_birth, 
+                                                                      end = date_joined))$year,
+                joined_month   = cal_month_start,
+                joined_country = sales_country) %>%
+  dplyr::mutate(age_bracket = dplyr::case_when(
+    member_age < 17 ~ "0-17",
+    member_age < 25 ~ "18-24",
+    member_age < 35 ~ "25-34", 
+    member_age < 40 ~ "35-39", 
+    member_age < 55 ~ "40-54", 
+    member_age < 65 ~ "55-64", 
+    TRUE ~ "65+" 
+  )) %>% 
+  dplyr::group_by(joined_month, joined_country, age_bracket) %>% 
+  dplyr::summarise(n = n()) %>% 
+  dplyr::ungroup() 
+  
+# below is for creating different product categories
 
 Jackets & vests 
 Puffer/insulated Jacket or Vest
