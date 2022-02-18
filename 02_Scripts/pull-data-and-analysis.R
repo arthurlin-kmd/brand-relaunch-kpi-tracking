@@ -105,23 +105,20 @@ collect_sales_metrics_modified <- function(.connection, .period_start, .period_e
     return(total_kmd_sales_tbl)
 }
 
-# Collect spend trend segmented by New and Existing Members----
-customer_age_bracket_metrics_tbl <- collect_sales_metrics_modified(.connection   = con, 
+# Collect spend trend and segment by New and Existing Members----
+customer_age_spend_profile_metrics_tbl <- collect_sales_metrics_modified(.connection   = con, 
                                                                    .period_start = reporting_period_start,
                                                                    .period_end   = reporting_period_end) %>%
   dplyr::mutate(customer_type = dplyr::case_when(customer_type == "Summit Club" ~ "Summit Club", 
                                                            TRUE ~ "Non Member"),
                 member_status = dplyr::case_when(date_joined < period_start ~ "Existing Members",
                                                  TRUE ~ "New Members")) %>% 
-  dplyr::filter(customer_type %in% c("Summit Club") & 
-                  member_status %in% c("New Members") &
-                  !is.na(date_of_birth)) %>%
+  dplyr::filter(customer_type %in% c("Summit Club")) %>%
   dplyr::collect() %>% 
   # member age is set to when they sign up to the program
-  dplyr::mutate(member_age = lubridate::as.period(lubridate::interval(start = date_of_birth, 
+  dplyr::mutate(member_age     = lubridate::as.period(lubridate::interval(start = date_of_birth, 
                                                                       end = date_joined))$year,
-                joined_month   = cal_month_start,
-                joined_country = sales_country) %>%
+                period_start   = cal_month_start) %>%
   dplyr::mutate(age_bracket = dplyr::case_when(
     member_age < 17 ~ "0-17",
     member_age < 25 ~ "18-24",
@@ -131,10 +128,16 @@ customer_age_bracket_metrics_tbl <- collect_sales_metrics_modified(.connection  
     member_age < 65 ~ "55-64", 
     TRUE ~ "65+" 
   )) %>% 
-  dplyr::group_by(joined_month, joined_country, age_bracket) %>% 
-  dplyr::summarise(n = n()) %>% 
-  dplyr::ungroup() 
-  
+  dplyr::group_by(period_start, sales_country, member_status, age_bracket) %>% 
+  dplyr::summarise(sum_sales_incl_gst = sum(sale_amount_incl_gst, na.rm = TRUE), 
+                   sum_txns = dplyr::n_distinct(sale_transaction), 
+                   sum_shoppers = dplyr::n_distinct(customer_number), 
+                   sum_units_sold = sum(sale_qty, na.rm = TRUE)) %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(mean_txn_sale_amount = (sum_sales_incl_gst/sum_txns), 
+                mean_member_rev = (sum_sales_incl_gst/sum_shoppers), 
+                mean_visit_freq = (sum_txns/sum_shoppers), mean_basket_size = (sum_units_sold/sum_txns))
+   
 # below is for creating different product categories
 
 Jackets & vests 
