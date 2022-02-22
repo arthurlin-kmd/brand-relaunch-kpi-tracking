@@ -33,8 +33,9 @@ library(lubridate)
 library(kmdr)
 
 # Set date variables ----------------------------------------------------------
-reporting_period_end <- as.Date("2021-12-12")
-reporting_period_start <- floor_date(reporting_period_end, "week", week_start = 1)
+reporting_period_end <- as.Date("2022-01-31")
+reporting_period_start <- floor_date(reporting_period_end, "year", week_start = 1)
+# reporting_period_start <- as.Date("2021-01-01")
 
 # Connect to database -----------------------------------------------------
 con <- DBI::dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "BIDW", 
@@ -55,15 +56,15 @@ collect_new_members_age <- function(.connection,
     dplyr::collect() %>% 
     dplyr::mutate(member_age = lubridate::as.period(lubridate::interval(start = date_of_birth, 
                                                                         end = date_joined))$year) %>% 
-    dplyr::mutate(age_bracket = dplyr::case_when(
-      member_age < 17 ~ "0-17",
-      member_age < 25 ~ "18-24",
-      member_age < 35 ~ "25-34", 
-      member_age < 40 ~ "35-39", 
-      member_age < 55 ~ "40-54", 
-      member_age < 65 ~ "55-64", 
-      TRUE ~ "65+" 
-    ))
+    dplyr::mutate(age_bracket = dplyr::case_when( member_age < 17  ~ "0-17",
+                                                  member_age < 25  ~ "18-24",
+                                                  member_age < 35  ~ "25-34", 
+                                                  member_age < 40  ~ "35-39", 
+                                                  member_age < 55  ~ "40-54", 
+                                                  member_age < 65  ~ "55-64", 
+                                                  member_age >= 65 ~ "65+",
+                                                  TRUE ~ "")
+                  )
   
   return(bq)
 }
@@ -72,26 +73,27 @@ acquisition_monthly_tbl <- collect_new_members_age(.connection   = con,
                                                    .period_start = reporting_period_start,
                                                    .period_end   = reporting_period_end) %>% 
   recode_dates() %>% 
-  rename(period_start = join_cal_month_start) %>% 
+  rename(period_start = join_cal_month_start) %>%
   group_by(period_start, join_fin_year, country, age_bracket) %>% 
   summarise(n = n()) %>% 
   ungroup()
 
-
+write_csv(acquisition_monthly_tbl, "03_Outputs/acquisition-monthly-Jan20-Jan22.csv", col_names = TRUE)
+collect_sales_metrics()
 
 # Collect Master Data for calculating KPI ----------------------------------------------------
 
-collect_sales_metrics_modified <- function(.connection, .period_start, .period_end){
+collect_sales_demo_product_metrics <- function(.connection, .period_start, .period_end){
   
   # this is a copy of base_txn_query with DOB and date_joined added
   tbls <- set_source_tables(connection = con)
-  total_kmd_sales_tbl <- tbls$fact_sales_trans %>% 
+  sales_bq <- tbls$fact_sales_trans %>% 
     dplyr::select(dim_date_key,dim_customer_key, dim_country_key, dim_location_key, dim_gift_voucher_key, sale_transaction, sale_amount_incl_gst, 
                   sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key) %>% 
     dplyr::filter(dim_gift_voucher_key == -1) %>% 
     dplyr::left_join(dplyr::select(tbls$dim_customer, dim_customer_key, customer_number, customer_type, contact_by_email, date_of_birth, date_joined), by = c("dim_customer_key")) %>% 
     dplyr::left_join(dplyr::select(tbls$dim_date, dim_date_key, full_date, cal_month_start, fin_year, acc_week_of_year, week_start), by = c("dim_date_key")) %>% 
-    dplyr::filter(dplyr::between(full_date, period_start, period_end)) %>% 
+    dplyr::filter(dplyr::between(full_date, .period_start, .period_end)) %>% 
     dplyr::left_join(dplyr::select(tbls$dim_location, dim_location_key, location_code), by = c("dim_location_key")) %>% 
     dplyr::left_join(dplyr::select(tbls$dim_product, dim_product_key, product_group, item_group), by = c("dim_product_key")) %>% 
     encode_sales_country() %>% 
@@ -102,80 +104,58 @@ collect_sales_metrics_modified <- function(.connection, .period_start, .period_e
                   customer_number, customer_type, sale_transaction, sale_amount_incl_gst, 
                   sale_amount_excl_gst, sale_qty, dim_product_key, dim_gift_voucher_key, 
                   date_of_birth, date_joined, product_group, item_group)
-    return(total_kmd_sales_tbl)
+    return(sales_bq)
 }
 
 # Collect spend trend and segment by New and Existing Members----
-customer_age_spend_profile_metrics_tbl <- collect_sales_metrics_modified(.connection   = con, 
-                                                                   .period_start = reporting_period_start,
-                                                                   .period_end   = reporting_period_end) %>%
+customer_age_spend_tbl <- collect_sales_demo_product_metrics(.connection   = con, 
+                                                             .period_start = reporting_period_start,
+                                                             .period_end   = reporting_period_end) %>%
   dplyr::mutate(customer_type = dplyr::case_when(customer_type == "Summit Club" ~ "Summit Club", 
                                                            TRUE ~ "Non Member"),
-                member_status = dplyr::case_when(date_joined < period_start ~ "Existing Members",
+                member_status = dplyr::case_when(date_joined < reporting_period_start ~ "Existing Members",
                                                  TRUE ~ "New Members")) %>% 
   dplyr::filter(customer_type %in% c("Summit Club")) %>%
   dplyr::collect() %>% 
   # member age is set to when they sign up to the program
-  dplyr::mutate(member_age     = lubridate::as.period(lubridate::interval(start = date_of_birth, 
-                                                                      end = date_joined))$year,
-                period_start   = cal_month_start) %>%
-  dplyr::mutate(age_bracket = dplyr::case_when(
-    member_age < 17 ~ "0-17",
-    member_age < 25 ~ "18-24",
-    member_age < 35 ~ "25-34", 
-    member_age < 40 ~ "35-39", 
-    member_age < 55 ~ "40-54", 
-    member_age < 65 ~ "55-64", 
-    TRUE ~ "65+" 
-  )) %>% 
+  dplyr::mutate(member_age       = lubridate::as.period(lubridate::interval(start = date_of_birth, end = date_joined))$year,
+                period_start     = cal_month_start) %>%
+  dplyr::mutate(age_bracket      = dplyr::case_when(member_age < 17 ~ "0-17",
+                                                    member_age < 25 ~ "18-24",
+                                                    member_age < 35 ~ "25-34", 
+                                                    member_age < 40 ~ "35-39", 
+                                                    member_age < 55 ~ "40-54", 
+                                                    member_age < 65 ~ "55-64", 
+                                                    member_age >= 65 ~ "65+",
+                                                    TRUE ~ "" 
+                                                  ),
+               mkt_prod_category = dplyr::case_when(product_group %in% c("Rainwear","Insulation","Fleece") ~ "Jackets & Vests",
+                                                    product_group %in% c("Footwear") ~ "Footwear",
+                                                    product_group %in% c("Active","Knits","Wovens","Baselayer","Socks","Clothing Accessories","Merino") ~ "Outdoor Clothing",
+                                                    product_group %in% c("Active Accessories","Camp & Picnic Accessories",
+                                                                        "Sleeping Bags & Mats","Travel Accessories","Tents","Lighting & Solar Power")  ~ "Activity Specific Gear",
+                                                    product_group %in% c("Packs & Bags","Pack Accessories") ~ "Bags",
+                                                    TRUE ~ "Others")) 
+
+
+customer_age_spend_profile_tbl <- customer_age_spend_tbl %>%
   dplyr::group_by(period_start, sales_country, member_status, age_bracket) %>% 
-  dplyr::summarise(sum_sales_incl_gst = sum(sale_amount_incl_gst, na.rm = TRUE), 
-                   sum_txns = dplyr::n_distinct(sale_transaction), 
-                   sum_shoppers = dplyr::n_distinct(customer_number), 
-                   sum_units_sold = sum(sale_qty, na.rm = TRUE)) %>% 
-  dplyr::ungroup() %>% 
-  dplyr::mutate(mean_txn_sale_amount = (sum_sales_incl_gst/sum_txns), 
-                mean_member_rev = (sum_sales_incl_gst/sum_shoppers), 
-                mean_visit_freq = (sum_txns/sum_shoppers), mean_basket_size = (sum_units_sold/sum_txns))
-   
-# below is for creating different product categories
+  dplyr::summarise(sum_sales_incl_gst  = sum(sale_amount_incl_gst, na.rm = TRUE), 
+                   sum_txns            = dplyr::n_distinct(sale_transaction), 
+                   sum_shoppers        = dplyr::n_distinct(customer_number), 
+                   sum_units_sold      = sum(sale_qty, na.rm = TRUE)) %>% 
+  dplyr::mutate(mean_txn_sale_amount   = (sum_sales_incl_gst/sum_txns),
+                mean_member_rev        = (sum_sales_incl_gst/sum_shoppers),
+                mean_visit_freq        = (sum_txns/sum_shoppers),  
+                mean_basket_size       = (sum_units_sold/sum_txns)) %>% 
+  dplyr::ungroup()
 
-Jackets & vests 
-Puffer/insulated Jacket or Vest
-Rain Jacket
-Fleece/Soft Shell Jacket
+customer_age_category_profile_tbl <- customer_age_spend_tbl %>%
+  dplyr::group_by(period_start, sales_country, member_status, age_bracket, customer_number) %>% 
+  dplyr::summarise(sum_category_shopped  = dplyr::n_distinct(product_group)) %>% 
+  dplyr::group_by(period_start, sales_country, member_status, age_bracket) %>% 
+  dplyr::summarise(mean_category_shopped = mean(sum_category_shopped)) %>% 
+  dplyr::ungroup()
 
-Footwear
-Hiking Footwear
-Walking / running footwear
-Other footwear for climbing, camping, travel
-
-Outdoor Clothing
-Merino clothing & accessories
-Shirt/T-shirt/Top
-Pants/ Shorts
-Leggings
-Thermals
-Dresses/ Skirts
-Hoodie/ Pullover
-Clothing accessories (hats, socks, gloves etc)
-Kids wear
-
-Activity Specific Gear
-Tents / Shelters
-Camping items (lighting, kitchen, furniture etc.)
-Sleeping bags / mats
-Travel Accessories
-Climbing equipment
-Hiking accessories
-Drink Bottles
-
-Bags
-Hiking
-Backpack
-Trolley / hybrid
-
-
-Others
-
-
+brand_relaunch_kpi_tbl <- customer_age_spend_profile_tbl %>% 
+  dplyr::left_join(customer_age_category_profile_tbl, by = c("period_start","sales_country","member_status","age_bracket"))
