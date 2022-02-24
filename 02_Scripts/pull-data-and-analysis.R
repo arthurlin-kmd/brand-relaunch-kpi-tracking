@@ -152,12 +152,15 @@ customer_age_spend_profile_tbl <- customer_age_spend_tbl %>%
                 mean_basket_size       = (sum_units_sold/sum_txns)) %>% 
   dplyr::ungroup()
 
-customer_age_category_profile_tbl <- customer_age_spend_tbl %>%
+customer_age_category_profile_tbl <- customer_age_spend_tbl %>% 
   dplyr::group_by(period_start, sales_country, member_status, age_bracket, customer_number) %>% 
-  dplyr::summarise(sum_category_shopped  = dplyr::n_distinct(product_group)) %>% 
+  dplyr::summarise(sum_category_shopped  = dplyr::n_distinct(mkt_prod_category)) %>%
   dplyr::group_by(period_start, sales_country, member_status, age_bracket) %>% 
-  dplyr::summarise(mean_category_shopped = mean(sum_category_shopped)) %>% 
-  dplyr::ungroup()
+  dplyr::summarise(sum_shoppers           = dplyr::n_distinct(customer_number),
+                   category_shopped_1plus = dplyr::n_distinct(case_when(sum_category_shopped > 1 ~ customer_number))) %>% 
+  dplyr::ungroup() %>% 
+  mutate(pct_category_shopped_1plus = (category_shopped_1plus/sum_shoppers)) %>% 
+  dplyr::select(-sum_shoppers,-category_shopped_1plus)
 
 brand_relaunch_kpi_tbl <- customer_age_spend_profile_tbl %>% 
   dplyr::left_join(customer_age_category_profile_tbl, by = c("period_start","sales_country","member_status","age_bracket"))
@@ -165,14 +168,13 @@ brand_relaunch_kpi_tbl <- customer_age_spend_profile_tbl %>%
 historical_kpi <- read_rds(here::here("03_Outputs/monthly-spend-profile.rds")) %>% 
   filter(period_start < reporting_period_start)
   
-
 rolling_brabd_kpi_tbl <- bind_rows(historical_kpi, brand_relaunch_kpi_tbl) %>% 
   arrange(period_start, sales_country, member_status, age_bracket)
 
 write_rds(rolling_brabd_kpi_tbl, here::here("03_Outputs/monthly-spend-profile.rds"))
 
 # run below when you are ready to export data into csv
-write_csv(rolling_brabd_kpi_tbl, "03_Outputs/age-spend-monthly-Jan21-Jan22.csv")
+# write_csv(rolling_brabd_kpi_tbl, "03_Outputs/age-spend-monthly-Jan21-Jan22.csv")
 
 
 
