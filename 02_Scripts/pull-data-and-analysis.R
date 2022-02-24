@@ -160,7 +160,7 @@ customer_age_category_profile_tbl <- customer_age_spend_tbl %>%
                    category_shopped_1plus = dplyr::n_distinct(case_when(sum_category_shopped > 1 ~ customer_number))) %>% 
   dplyr::ungroup() %>% 
   mutate(pct_category_shopped_1plus = (category_shopped_1plus/sum_shoppers)) %>% 
-  dplyr::select(-sum_shoppers,-category_shopped_1plus)
+  dplyr::select(-sum_shoppers)
 
 brand_relaunch_kpi_tbl <- customer_age_spend_profile_tbl %>% 
   dplyr::left_join(customer_age_category_profile_tbl, by = c("period_start","sales_country","member_status","age_bracket"))
@@ -174,7 +174,7 @@ rolling_brabd_kpi_tbl <- bind_rows(historical_kpi, brand_relaunch_kpi_tbl) %>%
 write_rds(rolling_brabd_kpi_tbl, here::here("03_Outputs/monthly-spend-profile.rds"))
 
 # run below when you are ready to export data into csv
-# write_csv(rolling_brabd_kpi_tbl, "03_Outputs/age-spend-monthly-Jan21-Jan22.csv")
+write_csv(rolling_brabd_kpi_tbl, "03_Outputs/age-spend-monthly-Jan21-Jan22.csv")
 
 
 
