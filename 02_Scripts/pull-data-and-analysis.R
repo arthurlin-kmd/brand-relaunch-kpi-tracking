@@ -34,8 +34,8 @@ library(kmdr)
 
 # Set date variables ----------------------------------------------------------
 reporting_period_end <- as.Date("2022-01-31")
-reporting_period_start <- floor_date(reporting_period_end, "year", week_start = 1)
-# reporting_period_start <- as.Date("2021-01-01")
+# reporting_period_start <- floor_date(reporting_period_end, "year", week_start = 1)
+reporting_period_start <- as.Date("2020-01-01")
 
 # Connect to database -----------------------------------------------------
 con <- DBI::dbConnect(odbc::odbc(), Driver = "SQL Server", Server = "BIDW", 
@@ -79,7 +79,6 @@ acquisition_monthly_tbl <- collect_new_members_age(.connection   = con,
   ungroup()
 
 write_csv(acquisition_monthly_tbl, "03_Outputs/acquisition-monthly-Jan20-Jan22.csv", col_names = TRUE)
-collect_sales_metrics()
 
 # Collect Master Data for calculating KPI ----------------------------------------------------
 
@@ -108,6 +107,9 @@ collect_sales_demo_product_metrics <- function(.connection, .period_start, .peri
 }
 
 # Collect spend trend and segment by New and Existing Members----
+reporting_period_end <- as.Date("2022-01-31")
+reporting_period_start <- floor_date(reporting_period_end, "month", week_start = 1)
+
 customer_age_spend_tbl <- collect_sales_demo_product_metrics(.connection   = con, 
                                                              .period_start = reporting_period_start,
                                                              .period_end   = reporting_period_end) %>%
@@ -159,3 +161,18 @@ customer_age_category_profile_tbl <- customer_age_spend_tbl %>%
 
 brand_relaunch_kpi_tbl <- customer_age_spend_profile_tbl %>% 
   dplyr::left_join(customer_age_category_profile_tbl, by = c("period_start","sales_country","member_status","age_bracket"))
+
+historical_kpi <- read_rds(here::here("03_Outputs/monthly-spend-profile.rds")) %>% 
+  filter(period_start < reporting_period_start)
+  
+
+rolling_brabd_kpi_tbl <- bind_rows(historical_kpi, brand_relaunch_kpi_tbl) %>% 
+  arrange(period_start, sales_country, member_status, age_bracket)
+
+write_rds(rolling_brabd_kpi_tbl, here::here("03_Outputs/monthly-spend-profile.rds"))
+
+# run below when you are ready to export data into csv
+write_csv(rolling_brabd_kpi_tbl, "03_Outputs/age-spend-monthly-Jan21-Jan22.csv")
+
+
+
